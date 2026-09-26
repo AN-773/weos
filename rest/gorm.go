@@ -74,9 +74,10 @@ func NewGORM(p GORMParams) (GORMResult, error) {
 				dbUser, authenticationToken, dbEndpoint, dbName,
 			)
 		case "postgres", "pgx":
-			connStr = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s",
-				dbHost, dbPort, dbUser, authenticationToken, dbName,
-			)
+			connStr, err = PostgresDSN(config, authenticationToken)
+			if err != nil {
+				return GORMResult{}, err
+			}
 		default:
 			return GORMResult{}, InvalidAWSDriver
 		}
@@ -115,8 +116,10 @@ func NewGORM(p GORMParams) (GORMResult, error) {
 			connStr = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?sql_mode='ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION'&parseTime=true",
 				config.User, config.Password, config.Host, strconv.Itoa(config.Port), config.Database)
 		case "postgres", "pgx":
-			connStr = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-				config.Host, strconv.Itoa(config.Port), config.User, config.Password, config.Database)
+			connStr, err = PostgresDSN(config, config.Password)
+			if err != nil {
+				return GORMResult{}, err
+			}
 		default:
 			return GORMResult{}, errors.New(fmt.Sprintf("db driver '%s' is not supported ", config.Driver))
 		}
@@ -124,7 +127,8 @@ func NewGORM(p GORMParams) (GORMResult, error) {
 
 	db, err := sql.Open(config.Driver, connStr)
 	if err != nil {
-		return GORMResult{}, errors.New(fmt.Sprintf("error setting up connection to database '%s' with connection '%s'", err, connStr))
+		// the connection string is not included because it contains the password
+		return GORMResult{}, errors.New(fmt.Sprintf("error setting up connection to database '%s' (driver '%s', host '%s')", err, config.Driver, config.Host))
 	}
 
 	db.SetMaxOpenConns(config.MaxOpen)

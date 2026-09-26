@@ -34,6 +34,13 @@ type DBConfig struct {
 	MaxIdleTime int    `json:"max-idle-time"`
 	AwsIam      bool   `json:"aws-iam"`
 	AwsRegion   string `json:"aws-region"`
+	// SSLMode is the Postgres sslmode (disable, require, verify-ca, verify-full; allow/prefer only
+	// with the "pgx" driver). Empty falls back to the DB_SSLMODE, then PGSSLMODE environment
+	// variables, then "require".
+	SSLMode string `json:"ssl-mode"`
+	// SSLRootCert is a path to a CA bundle used to verify the server certificate
+	// (needed for verify-ca / verify-full). Empty falls back to DB_SSLROOTCERT.
+	SSLRootCert string `json:"ssl-root-cert"`
 }
 
 type LogConfig struct {
