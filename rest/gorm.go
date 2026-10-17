@@ -139,9 +139,10 @@ func NewGORM(p GORMParams) (GORMResult, error) {
 		//setup gorm
 		switch config.Driver {
 		case "postgres", "pgx":
-			gormConnection, err = gorm.Open(postgres.New(postgres.Config{
+			// Expand-only: boot-time AutoMigrate never alters an existing column (ExpandOnlyDialector).
+			gormConnection, err = gorm.Open(ExpandOnlyDialector{Dialector: postgres.New(postgres.Config{
 				Conn: db,
-			}), nil)
+			})}, nil)
 			if err != nil {
 				return GORMResult{}, err
 			}
