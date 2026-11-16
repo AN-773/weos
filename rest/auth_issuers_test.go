@@ -177,6 +177,7 @@ type jwksServer struct {
 	mu      sync.Mutex
 	body    []byte
 	status  int
+	gate    chan struct{} // when set, responses wait until it is closed
 	fetches atomic.Int32
 }
 
@@ -184,6 +185,12 @@ func newJWKSServer(t *testing.T, body []byte) *jwksServer {
 	s := &jwksServer{body: body, status: http.StatusOK}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.fetches.Add(1)
+		s.mu.Lock()
+		gate := s.gate
+		s.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -198,6 +205,36 @@ func (s *jwksServer) set(status int, body []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status, s.body = status, body
+}
+
+// slow makes the server hold every response until the returned release is
+// called (release is idempotent and also runs at cleanup, before Close).
+func (s *jwksServer) slow(t *testing.T) (release func()) {
+	gate := make(chan struct{})
+	s.mu.Lock()
+	s.gate = gate
+	s.mu.Unlock()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			s.mu.Lock()
+			s.gate = nil
+			s.mu.Unlock()
+			close(gate)
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// remoteOf is the JWKS cache of one issuer of a trusted-issuer validator.
+func remoteOf(t *testing.T, validator *OpenIDConnect, issuer string) *remoteKeySet {
+	t.Helper()
+	state, ok := validator.trusted.issuers[issuer]
+	if !ok || state.remote == nil {
+		t.Fatalf("no JWKS issuer %q", issuer)
+	}
+	return state.remote
 }
 
 func jwksOf(t *testing.T, keys ...testKey) []byte {
@@ -529,23 +566,122 @@ func TestTrustedIssuers_JWKSCaching(t *testing.T) {
 	}
 
 	// Issuer down: cached keys keep working after they go stale.
+	remote := remoteOf(t, validator, accountsIssuer)
 	server.set(http.StatusServiceUnavailable, []byte(`{}`))
 	c.add(jwksMaxAge + time.Second)
 	if !validate(tok(k1)) || !validate(tok(k2)) {
 		t.Fatal("cached keys must keep working while the JWKS is unreachable")
 	}
+	remote.background.Wait()
+	if !validate(tok(k1)) || !validate(tok(k2)) {
+		t.Fatal("cached keys must keep working after the refresh failed")
+	}
 	if n := server.fetches.Load(); n != 4 {
 		t.Fatalf("stale cache should try one refresh, fetched %d", n)
 	}
 
-	// A key removed from the JWKS stops working after the next refresh.
+	// A key removed from the JWKS stops working once the next refresh has run.
 	server.set(http.StatusOK, jwksOf(t, k2))
 	c.add(jwksMaxAge + time.Second)
+	if !validate(tok(k1)) {
+		t.Fatal("the cached k1 is served while the background refresh runs")
+	}
+	remote.background.Wait()
 	if validate(tok(k1)) {
 		t.Fatal("k1 was removed from the JWKS and must be refused")
 	}
 	if !validate(tok(k2)) {
 		t.Fatal("k2 still published")
+	}
+}
+
+// A slow JWKS host never delays a request whose kid is cached: the stale cache
+// serves while one background refresh runs. An unknown kid waits for one
+// refetch per interval, and a failed refresh keeps the cached keys.
+func TestTrustedIssuers_StaleCacheRefreshesInBackground(t *testing.T) {
+	g := loadGolden(t)
+	k1 := newKey(t, "rotation-1")
+	k2 := newKey(t, "rotation-2")
+	k3 := newKey(t, "rotation-3")
+	server := newJWKSServer(t, jwksOf(t, k1))
+	c := &clock{t: time.Now()}
+	validator := &OpenIDConnect{now: c.now, userIDClaim: "sub", roleClaim: "https://iam.weos.io/v1/roles"}
+	if err := validator.WithTrustedIssuers([]TrustedIssuer{{Issuer: accountsIssuer, JWKSURL: server.URL, Audiences: []string{g.Audience}}}); err != nil {
+		t.Fatal(err)
+	}
+	remote := remoteOf(t, validator, accountsIssuer)
+	validate := func(token string) bool {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		result, _ := validator.Validate(echo.New().NewContext(req, httptest.NewRecorder()))
+		return result.Valid
+	}
+	tok := func(k testKey) string {
+		return k.sign(t, claimsFor(accountsIssuer, g.Audience, g.UserID, g.AccountID, c.now()))
+	}
+	if !validate(tok(k1)) {
+		t.Fatal("k1 token refused")
+	}
+
+	// Stale cache, JWKS host hanging: concurrent requests with the cached kid
+	// return at once and start a single background fetch.
+	release := server.slow(t)
+	c.add(jwksMaxAge + time.Second)
+	token := tok(k1)
+	var wg sync.WaitGroup
+	var refused atomic.Int32
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !validate(token) {
+				refused.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("requests with a cached kid waited for the JWKS host (%s)", elapsed)
+	}
+	if refused.Load() != 0 {
+		t.Fatalf("%d requests with a cached kid refused", refused.Load())
+	}
+	release()
+	remote.background.Wait()
+	if n := server.fetches.Load(); n != 2 {
+		t.Fatalf("a stale cache should start one background refresh, fetched %d", n)
+	}
+
+	// Unknown kid: one synchronous refetch, then none within the interval.
+	server.set(http.StatusOK, jwksOf(t, k1, k2))
+	c.add(jwksMinRefreshInterval + time.Second)
+	if !validate(tok(k2)) {
+		t.Fatal("k2 should be fetched for its unknown kid")
+	}
+	for i := 0; i < 5; i++ {
+		if validate(tok(k3)) {
+			t.Fatal("k3 is not published")
+		}
+	}
+	if n := server.fetches.Load(); n != 3 {
+		t.Fatalf("an unknown kid should refetch once per interval, fetched %d", n)
+	}
+
+	// Refresh fails: cached keys keep working, retried once per interval.
+	server.set(http.StatusServiceUnavailable, []byte(`{}`))
+	c.add(jwksMaxAge + time.Second)
+	for round := 0; round < 2; round++ {
+		for i := 0; i < 5; i++ {
+			if !validate(tok(k1)) || !validate(tok(k2)) {
+				t.Fatal("cached keys must keep working while the refresh fails")
+			}
+		}
+		remote.background.Wait()
+		if n, want := server.fetches.Load(), int32(4+round); n != want {
+			t.Fatalf("failed refresh round %d: fetched %d, want %d", round, n, want)
+		}
+		c.add(jwksMinRefreshInterval + time.Second)
 	}
 }
 

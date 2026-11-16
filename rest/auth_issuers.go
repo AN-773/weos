@@ -25,10 +25,13 @@ package rest
 // the future, and `aud` contains one of that issuer's audiences. Claims are
 // then mapped exactly as before (x-jwt-map, string casts).
 //
-// JWKS keys are fetched lazily (the service boots when the issuer is down),
-// cached, refreshed after jwksMaxAge, and re-fetched when a token carries an
-// unknown `kid`, at most once per jwksMinRefreshInterval. When a refresh fails
-// the keys already cached keep working.
+// JWKS keys are fetched lazily (the service boots when the issuer is down) and
+// cached. A token whose `kid` is cached is always served from the cache: once
+// the cache is older than jwksMaxAge, one background refresh starts and the
+// request does not wait for it. Only a token with an unknown `kid` (or the
+// very first token) waits for a fetch. Fetches of either kind happen at most
+// once per jwksMinRefreshInterval. When a refresh fails the keys already
+// cached keep working.
 
 import (
 	"context"
@@ -221,14 +224,22 @@ type remoteKeySet struct {
 	noKidKeys   []*rsa.PublicKey
 	fetchedAt   time.Time
 	lastAttempt time.Time
+	refreshing  bool // a background refresh is running
+
+	// background tracks background refreshes (tests wait on it).
+	background sync.WaitGroup
 }
 
-// keysFor returns the keys to try for a token with this kid. It refreshes the
-// cache when it is older than jwksMaxAge or the kid is unknown, never more
-// often than jwksMinRefreshInterval.
+// keysFor returns the keys to try for a token with this kid. A cached kid is
+// served at once; when the cache is older than jwksMaxAge a background refresh
+// starts (single-flight). Only an unknown kid waits for a fetch. Fetches are
+// never more often than jwksMinRefreshInterval.
 func (s *remoteKeySet) keysFor(ctx context.Context, kid string) ([]*rsa.PublicKey, error) {
 	keys, fresh := s.lookup(kid)
-	if len(keys) > 0 && fresh {
+	if len(keys) > 0 {
+		if !fresh {
+			s.refreshInBackground()
+		}
 		return keys, nil
 	}
 	refreshErr := s.refresh(ctx)
@@ -260,6 +271,30 @@ func (s *remoteKeySet) lookup(kid string) ([]*rsa.PublicKey, bool) {
 }
 
 var errJWKSRateLimited = errors.New("jwks refreshed recently")
+
+// refreshInBackground starts one refresh unless one is already running or the
+// last attempt was within jwksMinRefreshInterval. It never blocks the caller.
+// The fetch is detached from the request (which may end first) and bounded by
+// jwksFetchTimeout. A failure leaves the cached keys in place.
+func (s *remoteKeySet) refreshInBackground() {
+	s.mu.Lock()
+	if s.refreshing || (!s.lastAttempt.IsZero() && s.now().Sub(s.lastAttempt) < jwksMinRefreshInterval) {
+		s.mu.Unlock()
+		return
+	}
+	s.refreshing = true
+	s.background.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.background.Done()
+		defer func() {
+			s.mu.Lock()
+			s.refreshing = false
+			s.mu.Unlock()
+		}()
+		_ = s.refresh(context.Background())
+	}()
+}
 
 func (s *remoteKeySet) refresh(ctx context.Context) error {
 	s.fetchMu.Lock()
