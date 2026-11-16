@@ -9,7 +9,7 @@ require (
 	github.com/casbin/gorm-adapter/v3 v3.23.0
 	github.com/coreos/go-oidc/v3 v3.10.0
 	github.com/getkin/kin-openapi v0.123.0
-	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.4.3
 	github.com/labstack/echo/v4 v4.11.4
 	github.com/labstack/gommon v0.4.2
