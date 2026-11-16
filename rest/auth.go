@@ -17,6 +17,7 @@ import (
 	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -105,9 +106,90 @@ type OpenIDConnect struct {
 	subscriptionClaim string
 	httpClient        *http.Client
 	KeySet            oidc.KeySet
+	// trusted is set in trusted-issuer mode (see auth_issuers.go); nil keeps
+	// the original discovery-document behaviour.
+	trusted *trustedIssuerVerifier
+	// now is the clock for trusted-issuer mode (tests set it).
+	now func() time.Time
+}
+
+// WithTrustedIssuers switches the validator to trusted-issuer mode with the
+// given issuers (the programmatic form of the JWT_* / LEGACY_IAM_* variables).
+func (o *OpenIDConnect) WithTrustedIssuers(issuers []TrustedIssuer) error {
+	if o.skipExpiryCheck {
+		return fmt.Errorf("%s cannot be combined with trusted issuers", SkipExpiryCheckExtension)
+	}
+	verifier, err := newTrustedIssuerVerifier(issuers, o.httpClient, o.now)
+	if err != nil {
+		return err
+	}
+	o.trusted = verifier
+	return nil
+}
+
+// validateTrustedIssuer is Validate in trusted-issuer mode. It always returns
+// a result (Valid false on any failure), and maps claims exactly as the
+// discovery-document mode does.
+func (o *OpenIDConnect) validateTrustedIssuer(ctxt echo.Context) (*ValidationResult, error) {
+	authorizationHeader := ctxt.Request().Header.Get("Authorization")
+	tokenString := strings.Replace(authorizationHeader, "Bearer ", "", -1)
+	payload, err := o.trusted.verify(ctxt.Request().Context(), tokenString)
+	if err != nil {
+		ctxt.Logger().Debugf("invalid token: %s", err)
+		return &ValidationResult{Valid: false, Token: tokenString}, err
+	}
+	var subject struct {
+		Subject string `json:"sub"`
+	}
+	if err = json.Unmarshal(payload, &subject); err != nil {
+		return &ValidationResult{Valid: false, Token: tokenString}, err
+	}
+	result := o.mapClaims(subject.Subject, func(v interface{}) error { return json.Unmarshal(payload, v) })
+	result.Valid = result.claimsErr == nil
+	result.Token = tokenString
+	return &result.ValidationResult, result.claimsErr
+}
+
+type mappedClaims struct {
+	ValidationResult
+	claimsErr error
+}
+
+// mapClaims applies the x-jwt-map to a verified token's claims. Both modes use
+// it, so the request context values are the same whichever issuer signed the
+// token: user defaults to sub, and role/account/application/subscription are
+// read with plain string casts, as WeOS always has.
+func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) error) (result mappedClaims) {
+	tclaims := make(map[string]interface{})
+	tclaims[o.userIDClaim] = subject
+	tclaims[o.roleClaim] = ""
+	if o.accountClaim != "" {
+		tclaims[o.accountClaim] = ""
+	}
+	if o.applicationClaim != "" {
+		tclaims[o.applicationClaim] = ""
+	}
+	result.claimsErr = claims(&tclaims)
+	if result.claimsErr == nil {
+		result.Role = tclaims[o.roleClaim].(string)
+		result.UserID = tclaims[o.userIDClaim].(string)
+		if o.accountClaim != "" {
+			result.AccountID = tclaims[o.accountClaim].(string)
+		}
+		if o.applicationClaim != "" {
+			result.ApplicationID = tclaims[o.applicationClaim].(string)
+		}
+		if o.subscriptionClaim != "" {
+			result.SubscriptionID = tclaims[o.subscriptionClaim].(string)
+		}
+	}
+	return result
 }
 
 func (o *OpenIDConnect) Validate(ctxt echo.Context) (result *ValidationResult, err error) {
+	if o.trusted != nil {
+		return o.validateTrustedIssuer(ctxt)
+	}
 	//get the Jwk url from open id connect url and validate url
 	openIDConfig, err := GetOpenIDConfig(o.connectURL, o.httpClient)
 	if err != nil {
@@ -151,29 +233,13 @@ func (o *OpenIDConnect) Validate(ctxt echo.Context) (result *ValidationResult, e
 			var subscriptionID string
 
 			if token != nil {
-				tclaims := make(map[string]interface{})
-				tclaims[o.userIDClaim] = token.Subject
-				tclaims[o.roleClaim] = ""
-				if o.accountClaim != "" {
-					tclaims[o.accountClaim] = ""
-				}
-				if o.applicationClaim != "" {
-					tclaims[o.applicationClaim] = ""
-				}
-				err = token.Claims(&tclaims)
-				if err == nil {
-					role = tclaims[o.roleClaim].(string)
-					userID = tclaims[o.userIDClaim].(string)
-					if o.accountClaim != "" {
-						accountID = tclaims[o.accountClaim].(string)
-					}
-					if o.applicationClaim != "" {
-						applicationID = tclaims[o.applicationClaim].(string)
-					}
-					if o.subscriptionClaim != "" {
-						subscriptionID = tclaims[o.subscriptionClaim].(string)
-					}
-				}
+				mapped := o.mapClaims(token.Subject, token.Claims)
+				err = mapped.claimsErr
+				role = mapped.Role
+				userID = mapped.UserID
+				accountID = mapped.AccountID
+				applicationID = mapped.ApplicationID
+				subscriptionID = mapped.SubscriptionID
 			}
 
 			return &ValidationResult{
@@ -221,7 +287,19 @@ func (o *OpenIDConnect) FromSchema(ctxt context.Context, scheme *openapi3.Securi
 	} else {
 		o.userIDClaim = "sub"
 	}
+	if err != nil {
+		return o, err
+	}
 
+	// Trusted-issuer mode when JWT_* / LEGACY_IAM_* are set; otherwise the
+	// original discovery-document behaviour (see auth_issuers.go).
+	issuers, err := TrustedIssuersFromEnv(os.Getenv)
+	if err != nil {
+		return o, err
+	}
+	if len(issuers) > 0 {
+		err = o.WithTrustedIssuers(issuers)
+	}
 	return o, err
 }
 
