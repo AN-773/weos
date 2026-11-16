@@ -481,6 +481,11 @@ func TestTrustedIssuers_Refusals(t *testing.T) {
 		"legacy IAM token, wrong audience": iam.sign(t, with(with(good, "iss", iamIssuer), "aud", []string{"m2m-audience"})),
 		"untrusted key, accounts kid":      testKey{kid: accountsKey.kid, key: other.key}.sign(t, good),
 		"unknown kid":                      unknownKid.sign(t, good),
+		"machine token (no user claim)":    accountsKey.sign(t, with(good, "https://iam.weos.io/v1/user", nil)),
+		"user claim differs from sub":      accountsKey.sign(t, with(good, "https://iam.weos.io/v1/user", "/users/someone-else")),
+		"no sub":                           accountsKey.sign(t, with(good, "sub", nil)),
+		"user claim not a string":          accountsKey.sign(t, with(good, "https://iam.weos.io/v1/user", 42)),
+		"legacy IAM machine token":         iam.sign(t, with(with(good, "iss", iamIssuer), "https://iam.weos.io/v1/user", nil)),
 		"garbage":                          "not.a.jwt",
 		"empty":                            "",
 	}

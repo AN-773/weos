@@ -22,8 +22,11 @@ package rest
 // In trusted-issuer mode a token is accepted only when its `iss` is one of the
 // configured issuers, its signature verifies with THAT issuer's keys (a key is
 // never accepted with another issuer), alg is RS256, `exp` is present and in
-// the future, and `aud` contains one of that issuer's audiences. Claims are
-// then mapped exactly as before (x-jwt-map, string casts).
+// the future, `aud` contains one of that issuer's audiences, and `sub` is a
+// non-empty string equal to the `https://iam.weos.io/v1/user` claim (so IAM's
+// machine tokens, which carry no user, are refused, as medai-accounts and
+// agent-v2 do). Claims are then mapped exactly as before (x-jwt-map, string
+// casts).
 //
 // JWKS keys are fetched lazily (the service boots when the issuer is down) and
 // cached. A token whose `kid` is cached is always served from the cache: once
@@ -65,6 +68,9 @@ const (
 	// EnvLegacyIAMAudience is the audience of old IAM tokens (IAM's
 	// WEOS_CLIENT_ID). Required with EnvLegacyIAMJWK.
 	EnvLegacyIAMAudience = "LEGACY_IAM_AUDIENCE"
+
+	// iamUserClaim is the user path ("/users/<id>"); `sub` must equal it.
+	iamUserClaim = "https://iam.weos.io/v1/user"
 
 	jwksMaxAge             = 10 * time.Minute
 	jwksMinRefreshInterval = 30 * time.Second
@@ -473,6 +479,17 @@ func (v *trustedIssuerVerifier) verify(ctx context.Context, tokenString string) 
 	}
 	if !containsAny(audiences, issuer.Audiences) {
 		return nil, fmt.Errorf("token audience not accepted for issuer %q", issuer.Issuer)
+	}
+	// A user token's sub is its user path; a token without one (e.g. an IAM
+	// machine token) or with a different one is not a user and is refused.
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("invalid token claims")
+	}
+	subject, _ := claims["sub"].(string)
+	user, _ := claims[iamUserClaim].(string)
+	if subject == "" || subject != user {
+		return nil, fmt.Errorf("token sub does not match %s (not a user token)", iamUserClaim)
 	}
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
