@@ -1,0 +1,25 @@
+{
+  "issuer": "https://auth.medicalstudent.ai",
+  "audience": "medai-test-audience",
+  "userId": "3MCplLm6ZCUcMsMiJUaPOGPM2bu",
+  "accountId": "3MCplMx5FjYgn1HGnMhFXQ4ruhJ",
+  "claims": {
+    "iat": 1794864553,
+    "session": "3MCplOyxdChDBtQqmsck0DUVdzh",
+    "https://iam.weos.io/v1/roles": "user",
+    "https://iam.weos.io/v1/account": "/accounts/3MCplMx5FjYgn1HGnMhFXQ4ruhJ",
+    "https://iam.weos.io/v1/tenant": "/tenants/medai",
+    "https://iam.weos.io/v1/tenant_role": "user",
+    "https://iam.weos.io/v1/user": "/users/3MCplLm6ZCUcMsMiJUaPOGPM2bu",
+    "https://iam.weos.io/v1/subscription": "inactive",
+    "https://iam.weos.io/v1/email": "golden.user@example.com",
+    "scope": "openid profile email",
+    "azp": "medai-test-audience",
+    "sub": "/users/3MCplLm6ZCUcMsMiJUaPOGPM2bu",
+    "exp": 1794865453,
+    "iss": "https://auth.medicalstudent.ai",
+    "aud": [
+      "medai-test-audience"
+    ]
+  }
+}

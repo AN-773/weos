@@ -1,0 +1,18 @@
+{
+  "issuer": "https://auth.medicalstudent.ai",
+  "jwks_uri": "http://accounts.test.localhost/oauth2/certs",
+  "id_token_signing_alg_values_supported": [
+    "RS256"
+  ],
+  "subject_types_supported": [
+    "public"
+  ],
+  "response_types_supported": [
+    "token"
+  ],
+  "scopes_supported": [
+    "openid",
+    "profile",
+    "email"
+  ]
+}
