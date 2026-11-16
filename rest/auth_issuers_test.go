@@ -50,7 +50,8 @@ security:
 
 const (
 	accountsIssuer = "https://auth.medicalstudent.ai"
-	iamIssuer      = DefaultLegacyIAMIssuer
+	// iamIssuer stands for IAM's BASE_URL+BASE_PATH (LEGACY_IAM_ISSUER).
+	iamIssuer = "https://msa-api-iam.azurewebsites.net"
 )
 
 type golden struct {
@@ -320,6 +321,8 @@ func TestTrustedIssuers_GoldenAccountsTokenMatchesIAMToken(t *testing.T) {
 	t.Setenv(EnvJWTJWKSURL, accounts.URL+"/oauth2/certs")
 	t.Setenv(EnvJWTAudience, g.Audience)
 	t.Setenv(EnvLegacyIAMJWK, iam.jwkJSON(t))
+	t.Setenv(EnvLegacyIAMIssuer, iamIssuer)
+	t.Setenv(EnvLegacyIAMAudience, g.Audience)
 	validator := newValidator(t, "http://iam-discovery-not-used.invalid", c.now)
 	if validator.trusted == nil {
 		t.Fatal("expected trusted-issuer mode")
@@ -559,15 +562,15 @@ func TestTrustedIssuersFromEnv(t *testing.T) {
 
 	issuers, err = TrustedIssuersFromEnv(env(map[string]string{
 		EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://auth.medicalstudent.ai/oauth2/certs", EnvJWTAudience: "aud-1, aud-2",
-		EnvLegacyIAMJWK: iam.jwkJSON(t),
+		EnvLegacyIAMJWK: iam.jwkJSON(t), EnvLegacyIAMIssuer: iamIssuer, EnvLegacyIAMAudience: "iam-client-id",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(issuers) != 2 || issuers[0].Issuer != accountsIssuer || issuers[1].Issuer != DefaultLegacyIAMIssuer {
+	if len(issuers) != 2 || issuers[0].Issuer != accountsIssuer || issuers[1].Issuer != iamIssuer {
 		t.Fatalf("unexpected issuers %#v", issuers)
 	}
-	if strings.Join(issuers[0].Audiences, "|") != "aud-1|aud-2" || strings.Join(issuers[1].Audiences, "|") != "aud-1|aud-2" {
+	if strings.Join(issuers[0].Audiences, "|") != "aud-1|aud-2" || strings.Join(issuers[1].Audiences, "|") != "iam-client-id" {
 		t.Fatalf("audiences: %#v %#v", issuers[0].Audiences, issuers[1].Audiences)
 	}
 	if issuers[1].PinnedKeys[0].KeyID != iam.kid || issuers[1].PinnedKeys[0].Key.N.Cmp(iam.key.N) != 0 {
@@ -585,11 +588,13 @@ func TestTrustedIssuersFromEnv(t *testing.T) {
 		"issuer without JWKS":       {EnvJWTIssuer: accountsIssuer, EnvJWTAudience: "a"},
 		"JWKS without issuer":       {EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a"},
 		"issuer without audience":   {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs"},
-		"legacy without audience":   {EnvLegacyIAMJWK: iam.jwkJSON(t)},
-		"legacy issuer == issuer":   {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a", EnvLegacyIAMJWK: iam.jwkJSON(t), EnvLegacyIAMIssuer: accountsIssuer},
+		"legacy key alone":          {EnvLegacyIAMJWK: iam.jwkJSON(t)},
+		"legacy without issuer":     {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a", EnvLegacyIAMJWK: iam.jwkJSON(t), EnvLegacyIAMAudience: "a"},
+		"legacy without audience":   {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a", EnvLegacyIAMJWK: iam.jwkJSON(t), EnvLegacyIAMIssuer: iamIssuer},
+		"legacy issuer == issuer":   {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a", EnvLegacyIAMJWK: iam.jwkJSON(t), EnvLegacyIAMIssuer: accountsIssuer, EnvLegacyIAMAudience: "a"},
 		"legacy issuer without key": {EnvJWTIssuer: accountsIssuer, EnvJWTJWKSURL: "https://x/certs", EnvJWTAudience: "a", EnvLegacyIAMIssuer: iamIssuer},
-		"private JWK":               {EnvLegacyIAMJWK: string(privateJWK), EnvJWTAudience: "a"},
-		"not JSON":                  {EnvLegacyIAMJWK: "-----BEGIN PUBLIC KEY-----", EnvJWTAudience: "a"},
+		"private JWK":               {EnvLegacyIAMJWK: string(privateJWK), EnvLegacyIAMIssuer: iamIssuer, EnvLegacyIAMAudience: "a"},
+		"not JSON":                  {EnvLegacyIAMJWK: "-----BEGIN PUBLIC KEY-----", EnvLegacyIAMIssuer: iamIssuer, EnvLegacyIAMAudience: "a"},
 		"audience alone":            {EnvJWTAudience: "a"},
 	}
 	for name, vars := range bad {
@@ -616,6 +621,17 @@ func TestTrustedIssuersFromEnv(t *testing.T) {
 	}
 	if _, err = new(OpenIDConnect).FromSchema(context.Background(), doc.Components.SecuritySchemes["OpenIdConnect"].Value, http.DefaultClient); err == nil {
 		t.Fatal("FromSchema must refuse an incomplete trusted-issuer config")
+	}
+
+	// The legacy IAM issuer and audience have no defaults: boot names each missing one.
+	clearIssuerEnv(t)
+	t.Setenv(EnvJWTIssuer, accountsIssuer)
+	t.Setenv(EnvJWTJWKSURL, "https://x/certs")
+	t.Setenv(EnvJWTAudience, "a")
+	t.Setenv(EnvLegacyIAMJWK, iam.jwkJSON(t))
+	_, err = new(OpenIDConnect).FromSchema(context.Background(), doc.Components.SecuritySchemes["OpenIdConnect"].Value, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), EnvLegacyIAMIssuer+" is required") || !strings.Contains(err.Error(), EnvLegacyIAMAudience+" is required") {
+		t.Fatalf("FromSchema must name the missing legacy IAM settings, got %v", err)
 	}
 }
 

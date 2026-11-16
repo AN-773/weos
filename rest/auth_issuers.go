@@ -14,8 +14,10 @@ package rest
 //	JWT_JWKS_URL         JWKS of that issuer (e.g. https://auth.medicalstudent.ai/oauth2/certs)
 //	JWT_AUDIENCE         `aud` the token must contain (comma-separated for several)
 //	LEGACY_IAM_JWK       pinned RSA public JWK of the old IAM issuer; unset = old IAM tokens refused
-//	LEGACY_IAM_ISSUER    `iss` accepted with that key (default https://msa-api-iam.azurewebsites.net)
-//	LEGACY_IAM_AUDIENCE  `aud` for old IAM tokens (default JWT_AUDIENCE)
+//	LEGACY_IAM_ISSUER    `iss` accepted with that key: IAM's BASE_URL+BASE_PATH, exactly as IAM
+//	                     puts it in its tokens. Required when LEGACY_IAM_JWK is set (no default).
+//	LEGACY_IAM_AUDIENCE  `aud` for old IAM tokens: IAM's WEOS_CLIENT_ID (comma-separated for
+//	                     several). Required when LEGACY_IAM_JWK is set (no default).
 //
 // In trusted-issuer mode a token is accepted only when its `iss` is one of the
 // configured issuers, its signature verifies with THAT issuer's keys (a key is
@@ -54,13 +56,12 @@ const (
 	EnvJWTAudience = "JWT_AUDIENCE"
 	// EnvLegacyIAMJWK is the pinned public JWK of the old IAM issuer.
 	EnvLegacyIAMJWK = "LEGACY_IAM_JWK"
-	// EnvLegacyIAMIssuer is the `iss` accepted with the pinned IAM key.
+	// EnvLegacyIAMIssuer is the `iss` accepted with the pinned IAM key (IAM's
+	// BASE_URL+BASE_PATH). Required with EnvLegacyIAMJWK.
 	EnvLegacyIAMIssuer = "LEGACY_IAM_ISSUER"
-	// EnvLegacyIAMAudience is the audience of old IAM tokens (defaults to JWT_AUDIENCE).
+	// EnvLegacyIAMAudience is the audience of old IAM tokens (IAM's
+	// WEOS_CLIENT_ID). Required with EnvLegacyIAMJWK.
 	EnvLegacyIAMAudience = "LEGACY_IAM_AUDIENCE"
-
-	// DefaultLegacyIAMIssuer is the issuer IAM has always put in its tokens.
-	DefaultLegacyIAMIssuer = "https://msa-api-iam.azurewebsites.net"
 
 	jwksMaxAge             = 10 * time.Minute
 	jwksMinRefreshInterval = 30 * time.Second
@@ -115,16 +116,15 @@ func TrustedIssuersFromEnv(getenv func(string) string) ([]TrustedIssuer, error) 
 		issuers = append(issuers, TrustedIssuer{Issuer: issuer, JWKSURL: jwksURL, Audiences: splitList(audience)})
 	}
 	if legacyJWK != "" {
+		// No defaults: IAM's issuer and audience differ per environment, and a
+		// guessed value either refuses every IAM token or accepts the wrong ones.
 		if legacyIssuer == "" {
-			legacyIssuer = DefaultLegacyIAMIssuer
+			problems = append(problems, EnvLegacyIAMIssuer+" is required when "+EnvLegacyIAMJWK+" is set (IAM's BASE_URL+BASE_PATH, the `iss` of its tokens)")
 		}
 		if legacyAudience == "" {
-			legacyAudience = audience
+			problems = append(problems, EnvLegacyIAMAudience+" is required when "+EnvLegacyIAMJWK+" is set (IAM's WEOS_CLIENT_ID, the `aud` of its tokens)")
 		}
-		if legacyAudience == "" {
-			problems = append(problems, EnvLegacyIAMAudience+" (or "+EnvJWTAudience+") is required when "+EnvLegacyIAMJWK+" is set")
-		}
-		if legacyIssuer == issuer {
+		if legacyIssuer != "" && legacyIssuer == issuer {
 			problems = append(problems, EnvLegacyIAMIssuer+" must differ from "+EnvJWTIssuer+" (the IAM key is accepted only with IAM's issuer)")
 		}
 		key, err := ParsePublicJWK([]byte(legacyJWK))
