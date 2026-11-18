@@ -43,6 +43,10 @@ type ValidationResult struct {
 	// a present "" (or a non-string) means no permissions.
 	Permissions             string
 	PermissionsClaimPresent bool
+	// LegacyIssuer is true when, in trusted-issuer mode, the old IAM issuer
+	// (LEGACY_IAM_*) verified the token. Its v1/permissions claim, if any, is
+	// ignored: the legacy mapping decides (PermissionCatalogue.EffectivePermissions).
+	LegacyIssuer bool
 }
 
 // IsUserToken reports whether the token names a user: sub is non-empty and
@@ -169,11 +173,12 @@ func (o *OpenIDConnect) WithTrustedIssuers(issuers []TrustedIssuer) error {
 func (o *OpenIDConnect) validateTrustedIssuer(ctxt echo.Context) (*ValidationResult, error) {
 	authorizationHeader := ctxt.Request().Header.Get("Authorization")
 	tokenString := strings.Replace(authorizationHeader, "Bearer ", "", -1)
-	payload, err := o.trusted.verify(ctxt.Request().Context(), tokenString)
+	verified, err := o.trusted.verify(ctxt.Request().Context(), tokenString)
 	if err != nil {
 		ctxt.Logger().Debugf("invalid token: %s", err)
 		return &ValidationResult{Valid: false, Token: tokenString}, err
 	}
+	payload := verified.payload
 	var subject struct {
 		Subject string `json:"sub"`
 	}
@@ -183,6 +188,7 @@ func (o *OpenIDConnect) validateTrustedIssuer(ctxt echo.Context) (*ValidationRes
 	result := o.mapClaims(subject.Subject, func(v interface{}) error { return json.Unmarshal(payload, v) })
 	result.Valid = result.claimsErr == nil
 	result.Token = tokenString
+	result.LegacyIssuer = verified.issuer.Legacy
 	return &result.ValidationResult, result.claimsErr
 }
 
@@ -195,8 +201,15 @@ type mappedClaims struct {
 // it, so the request context values are the same whichever issuer signed the
 // token: user defaults to sub, and role/account/application/subscription,
 // tenant, tenant_role and permissions are read as strings ("" when absent).
+//
+// The defaults (user = sub, role = "") fill only the x-jwt-map values. The
+// route-gate claims (v1/user, tenant, tenant_role, permissions) are read from
+// the token's own claims, so a token without v1/user is never a user token
+// through the sub default, even when x-jwt-map maps user to v1/user.
 func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) error) (result mappedClaims) {
-	tclaims := make(map[string]interface{})
+	raw := make(map[string]interface{})
+	result.claimsErr = claims(&raw)
+	tclaims := make(map[string]interface{}, len(raw)+4)
 	tclaims[o.userIDClaim] = subject
 	tclaims[o.roleClaim] = ""
 	if o.accountClaim != "" {
@@ -205,7 +218,9 @@ func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) err
 	if o.applicationClaim != "" {
 		tclaims[o.applicationClaim] = ""
 	}
-	result.claimsErr = claims(&tclaims)
+	for name, value := range raw {
+		tclaims[name] = value
+	}
 	if result.claimsErr == nil {
 		// Every claim is read with comma-ok: IAM and older tokens lack some of
 		// them (v1/subscription, v1/tenant_role, v1/permissions), and a missing
@@ -222,11 +237,11 @@ func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) err
 			result.SubscriptionID, _ = tclaims[o.subscriptionClaim].(string)
 		}
 		result.Subject = subject
-		result.User, _ = tclaims[iamUserClaim].(string)
-		result.Tenant, _ = tclaims[o.claimName(o.tenantClaim, TenantClaim)].(string)
-		result.TenantRole, _ = tclaims[o.claimName(o.tenantRoleClaim, TenantRoleClaim)].(string)
+		result.User, _ = raw[iamUserClaim].(string)
+		result.Tenant, _ = raw[o.claimName(o.tenantClaim, TenantClaim)].(string)
+		result.TenantRole, _ = raw[o.claimName(o.tenantRoleClaim, TenantRoleClaim)].(string)
 		var permissions interface{}
-		permissions, result.PermissionsClaimPresent = tclaims[o.claimName(o.permissionsClaim, PermissionsClaim)]
+		permissions, result.PermissionsClaimPresent = raw[o.claimName(o.permissionsClaim, PermissionsClaim)]
 		result.Permissions, _ = permissions.(string)
 	}
 	return result

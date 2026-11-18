@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -211,20 +212,20 @@ func DefaultPermissionCatalogue() *PermissionCatalogue {
 func (c *PermissionCatalogue) Known(name string) bool { return c.names[name] }
 
 // LegacyPermissions is accounts' legacyPermissions for a token without the
-// claim (IAM tokens, older tokens): superadmin → ["*"]; in the MedAI workspace
-// (tenant in medaiTenants) the staff bundle for staffRole, else none; elsewhere
-// the bundle of tenantRoleBundles[tenantRole], else none. Exact, case-sensitive.
+// claim (IAM tokens, older tokens): superadmin (v1/roles exactly the
+// superadmin role) → ["*"]; in the MedAI workspace (see IsMedaiTenant) the
+// staff bundle for staffRole, else none; elsewhere the bundle of
+// tenantRoleBundles[tenantRole], else none. Role and tenant-role matches are
+// exact and case-sensitive.
 func (c *PermissionCatalogue) LegacyPermissions(roles, tenant, tenantRole string) []string {
 	if roles == c.superadminRole {
 		return []string{AllPermissions}
 	}
-	for _, medai := range c.medaiTenants {
-		if tenant == medai {
-			if roles == c.staffRole {
-				return append([]string{}, c.staff...)
-			}
-			return []string{}
+	if c.IsMedaiTenant(tenant) {
+		if roles == c.staffRole {
+			return append([]string{}, c.staff...)
 		}
+		return []string{}
 	}
 	if key, ok := c.tenantBundles[tenantRole]; ok {
 		return append([]string{}, c.roles[key]...)
@@ -232,17 +233,87 @@ func (c *PermissionCatalogue) LegacyPermissions(roles, tenant, tenantRole string
 	return []string{}
 }
 
-// EffectivePermissions is what a verified token may do: superadmin (v1/roles
-// holds the superadmin role) → ["*"]; the claim when its key is present ("" is
-// none, never the fallback); the legacy mapping only when the key is absent.
+// IsMedaiTenant reports whether a v1/tenant value names the MedAI workspace
+// for the legacy mapping. The value is first normalised exactly as the
+// services' tenant code does (learning's tenantctx.NormalizeID): a URL keeps
+// only its path, BASE_PATH and a leading /v1 are stripped. So IAM's "", the
+// catalogue's medaiTenants ("", "/tenants/medai", "medai") and their URL,
+// BASE_PATH and /v1 forms ("https://iam.example/tenants/medai",
+// "/v1/tenants/medai") are MedAI.
+//
+// A non-empty value that normalises to nothing (junk, or a bare id other than
+// "medai") is not MedAI: it fails closed to the tenant-role bundles, never to
+// the staff bundle.
+func (c *PermissionCatalogue) IsMedaiTenant(tenant string) bool {
+	trimmed := strings.TrimSpace(tenant)
+	normalized := NormalizeTenantID(trimmed)
+	for _, medai := range c.medaiTenants {
+		if trimmed == medai || (normalized != "" && normalized == medai) {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeTenantID is learning's tenantctx.NormalizeID: the tenant path of a
+// v1/tenant value ("/tenants/<id>"), or "" when it has none. A URL keeps only
+// its path; BASE_PATH (the service's env) and a leading "/v1" are stripped; a
+// value without a "/" is "" (a bare id is not a path); a path of fewer than
+// two segments is "".
+func NormalizeTenantID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		raw = parsed.EscapedPath()
+		if raw == "" {
+			raw = parsed.Path
+		}
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if basePath := strings.TrimSpace(os.Getenv("BASE_PATH")); basePath != "" && basePath != "/" {
+		if raw == basePath {
+			raw = "/"
+		} else if strings.HasPrefix(raw, basePath+"/") {
+			raw = strings.TrimPrefix(raw, basePath)
+		}
+	}
+	if !strings.HasPrefix(raw, "/") {
+		if !strings.Contains(raw, "/") {
+			return ""
+		}
+		raw = "/" + raw
+	}
+	if strings.HasPrefix(raw, "/v1/") {
+		raw = strings.TrimPrefix(raw, "/v1")
+	}
+	if parts := strings.Split(strings.Trim(raw, "/"), "/"); len(parts) < 2 {
+		return ""
+	}
+	return raw
+}
+
+// EffectivePermissions is what a verified token may do:
+//   - a token the old IAM issuer verified (LegacyIssuer) gets the legacy
+//     mapping, whatever v1/permissions it carries (IAM never mints the claim);
+//   - otherwise, when the v1/permissions key is present, the claim alone
+//     decides ("" is none, never the fallback; accounts writes "*" for a
+//     superadmin, so v1/roles is not read);
+//   - only when the key is absent, the legacy mapping (where superadmin is
+//     v1/roles exactly the superadmin role).
 func (c *PermissionCatalogue) EffectivePermissions(r *ValidationResult) []string {
 	if r == nil {
 		return []string{}
 	}
-	if listContains(splitClaimList(r.Role), c.superadminRole) {
-		return []string{AllPermissions}
-	}
-	if r.PermissionsClaimPresent {
+	if r.PermissionsClaimPresent && !r.LegacyIssuer {
 		return ParsePermissionsClaim(r.Permissions)
 	}
 	return c.LegacyPermissions(r.Role, r.Tenant, r.TenantRole)

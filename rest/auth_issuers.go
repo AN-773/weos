@@ -90,6 +90,11 @@ type TrustedIssuer struct {
 	JWKSURL string
 	// PinnedKeys are fixed public keys (e.g. the old IAM key during the overlap).
 	PinnedKeys []PublicJWK
+	// Legacy marks the old IAM issuer (LEGACY_IAM_*). A token it verified is
+	// an IAM token: any v1/permissions claim it carries is ignored and the
+	// legacy mapping decides (ValidationResult.LegacyIssuer), because IAM never
+	// mints that claim and accounts is the only issuer allowed to.
+	Legacy bool
 }
 
 // PublicJWK is an RSA public key with its optional key id.
@@ -141,7 +146,7 @@ func TrustedIssuersFromEnv(getenv func(string) string) ([]TrustedIssuer, error) 
 			// Never echo the value: name the variable only.
 			problems = append(problems, EnvLegacyIAMJWK+": "+err.Error())
 		}
-		issuers = append(issuers, TrustedIssuer{Issuer: legacyIssuer, PinnedKeys: []PublicJWK{key}, Audiences: splitList(legacyAudience)})
+		issuers = append(issuers, TrustedIssuer{Issuer: legacyIssuer, PinnedKeys: []PublicJWK{key}, Audiences: splitList(legacyAudience), Legacy: true})
 	} else if legacyIssuer != "" || legacyAudience != "" {
 		problems = append(problems, EnvLegacyIAMIssuer+"/"+EnvLegacyIAMAudience+" are set but "+EnvLegacyIAMJWK+" is not")
 	}
@@ -437,8 +442,15 @@ func newTrustedIssuerVerifier(issuers []TrustedIssuer, httpClient *http.Client, 
 	return v, nil
 }
 
-// verify checks the token and returns its verified payload (the raw JSON).
-func (v *trustedIssuerVerifier) verify(ctx context.Context, tokenString string) (payload []byte, err error) {
+// verifiedToken is a token's verified payload (the raw JSON) and the issuer
+// whose key verified it.
+type verifiedToken struct {
+	payload []byte
+	issuer  TrustedIssuer
+}
+
+// verify checks the token and returns its verified payload and issuer.
+func (v *trustedIssuerVerifier) verify(ctx context.Context, tokenString string) (verified verifiedToken, err error) {
 	var issuer *issuerState
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256"}),
@@ -468,34 +480,38 @@ func (v *trustedIssuerVerifier) verify(ctx context.Context, tokenString string) 
 		return set, nil
 	})
 	if err != nil {
-		return nil, err
+		return verifiedToken{}, err
 	}
 	if !token.Valid || issuer == nil {
-		return nil, errors.New("invalid token")
+		return verifiedToken{}, errors.New("invalid token")
 	}
 	audiences, err := token.Claims.GetAudience()
 	if err != nil {
-		return nil, err
+		return verifiedToken{}, err
 	}
 	if !containsAny(audiences, issuer.Audiences) {
-		return nil, fmt.Errorf("token audience not accepted for issuer %q", issuer.Issuer)
+		return verifiedToken{}, fmt.Errorf("token audience not accepted for issuer %q", issuer.Issuer)
 	}
 	// A user token's sub is its user path; a token without one (e.g. an IAM
 	// machine token) or with a different one is not a user and is refused.
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return nil, errors.New("invalid token claims")
+		return verifiedToken{}, errors.New("invalid token claims")
 	}
 	subject, _ := claims["sub"].(string)
 	user, _ := claims[iamUserClaim].(string)
 	if subject == "" || subject != user {
-		return nil, fmt.Errorf("token sub does not match %s (not a user token)", iamUserClaim)
+		return verifiedToken{}, fmt.Errorf("token sub does not match %s (not a user token)", iamUserClaim)
 	}
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
-		return nil, errors.New("malformed token")
+		return verifiedToken{}, errors.New("malformed token")
 	}
-	return base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return verifiedToken{}, err
+	}
+	return verifiedToken{payload: payload, issuer: issuer.TrustedIssuer}, nil
 }
 
 func containsAny(have []string, want []string) bool {

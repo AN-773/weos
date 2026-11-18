@@ -2,6 +2,8 @@ package rest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -213,8 +215,12 @@ var gateUsers = fakeValidator{
 	"iam-staff": user("i2", "Administrator", "", ""),
 	// An IAM token for an Administrator who is a university user: not staff.
 	"iam-admin-uni-user": user("i3", "Administrator", "/tenants/uni-1", "user"),
-	// Superadmin with an empty claim still passes everything.
-	"superadmin": withClaim(user("s1", "superadmin", "/tenants/medai", "user"), ""),
+	// Superadmin as accounts mints it: v1/permissions "*" (the claim decides).
+	"superadmin": withClaim(user("s1", "superadmin", "/tenants/medai", "user"), "*"),
+	// v1/roles superadmin but v1/permissions "": the claim decides, none.
+	"superadmin-role-empty-claim": withClaim(user("s2", "superadmin", "/tenants/medai", "user"), ""),
+	// An IAM superadmin (no claim): legacy, exact role.
+	"iam-superadmin": user("s3", "superadmin", "", ""),
 	// A valid token that is not a user (sub differs from v1/user).
 	"machine": {UserID: "svc", Subject: "svc", Role: "Administrator"},
 }
@@ -314,11 +320,89 @@ func TestPermissionCatalogue_LegacyMatchesAccounts(t *testing.T) {
 		{"administrator lower-case fails closed", "administrator", "", "", ""},
 		{"nothing", "", "", "", ""},
 		{"prototype-ish tenant role", "user", uni, "__proto__", ""},
+		// The tenant is normalised as learning's tenantctx.NormalizeID does.
+		{"staff Administrator (tenant URL with host)", "Administrator", "https://iam.example.test/tenants/medai", "user", staff},
+		{"staff Administrator (/v1/tenants/medai)", "Administrator", "/v1/tenants/medai", "user", staff},
+		{"staff Administrator (host and /v1)", "Administrator", "https://iam.example.test/v1/tenants/medai", "user", staff},
+		{"staff Administrator (spaces)", "Administrator", " /tenants/medai ", "user", staff},
+		{"university admin (tenant URL with host)", "user", "https://iam.example.test/tenants/uni-1", "admin", admin},
+		{"Administrator in a university (tenant URL): not staff", "Administrator", "https://iam.example.test/v1/tenants/uni-1", "user", ""},
+		{"junk tenant fails closed: not MedAI", "Administrator", "uni-1", "user", ""},
+		{"host only fails closed: not MedAI", "Administrator", "https://iam.example.test", "user", ""},
+		{"superadmin needs the exact role, no list", "superadmin,user", "", "", ""},
+		{"superadmin padded is not superadmin", " superadmin", "", "", ""},
 	}
 	for _, tc := range cases {
 		if got := join(c.LegacyPermissions(tc.roles, tc.tenant, tc.tenantRole)); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestPermissionCatalogue_LegacyTenantBasePath(t *testing.T) {
+	c := DefaultPermissionCatalogue()
+	t.Setenv("BASE_PATH", "/learning")
+	staff := strings.Join(sortedCopy(c.staff), ",")
+	for _, tenant := range []string{"/learning/tenants/medai", "https://iam.example.test/learning/tenants/medai", "/learning/v1/tenants/medai", "", "medai", "/tenants/medai"} {
+		if got := strings.Join(sortedCopy(c.LegacyPermissions("Administrator", tenant, "user")), ","); got != staff {
+			t.Errorf("tenant %q: got %q, want the staff bundle", tenant, got)
+		}
+	}
+	if got := c.LegacyPermissions("Administrator", "/learning/tenants/uni-1", "user"); len(got) != 0 {
+		t.Errorf("a university under BASE_PATH is not MedAI: %v", got)
+	}
+}
+
+func TestEffectivePermissions_ClaimDecidesAndLegacyIssuer(t *testing.T) {
+	c := DefaultPermissionCatalogue()
+	join := func(list []string) string { return strings.Join(list, ",") }
+	cases := []struct {
+		name   string
+		result *ValidationResult
+		want   string
+	}{
+		{"superadmin role with an empty claim: the claim decides (none)", withClaim(user("1", "superadmin", "/tenants/medai", "user"), ""), ""},
+		{"superadmin role with a workspace claim: the claim decides", withClaim(user("1", "superadmin", "/tenants/uni-1", "admin"), "content:generate"), "content:generate"},
+		{"accounts superadmin claim", withClaim(user("1", "user", "/tenants/medai", "user"), "*"), "*"},
+		{"no claim, role superadmin: legacy *", user("1", "superadmin", "", ""), "*"},
+		{"no claim, role list holding superadmin: legacy is exact, none", user("1", "user,superadmin", "", ""), ""},
+		{"no claim, role Superadmin: legacy is case-sensitive, none", user("1", "Superadmin", "", ""), ""},
+	}
+	legacy := withClaim(user("1", "user", "/tenants/uni-1", "user"), "*")
+	legacy.LegacyIssuer = true
+	cases = append(cases, struct {
+		name   string
+		result *ValidationResult
+		want   string
+	}{"legacy IAM issuer: a planted claim is ignored, legacy mapping", legacy, ""})
+	legacyAdmin := withClaim(user("1", "user", "/tenants/uni-1", "admin"), "")
+	legacyAdmin.LegacyIssuer = true
+	cases = append(cases, struct {
+		name   string
+		result *ValidationResult
+		want   string
+	}{"legacy IAM issuer: an empty claim is ignored too", legacyAdmin, join(c.roles["admin"])})
+	for _, tc := range cases {
+		if got := join(c.EffectivePermissions(tc.result)); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// vendoredCatalogueSHA256 pins the embedded catalogue to medai-accounts
+// docs/permissions.json. When accounts changes the catalogue, copy the file
+// and update this constant (scripts/check-permissions-copies.sh in the medai
+// workspace diffs every copy against accounts).
+const vendoredCatalogueSHA256 = "b2cd807a120b183f45237f8d003ec6929e4cff0bbe2d88fb2ec058e3a7817a1c"
+
+func TestDefaultCatalogue_ContentHash(t *testing.T) {
+	raw, err := os.ReadFile("route_gate_permissions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != vendoredCatalogueSHA256 {
+		t.Fatalf("route_gate_permissions.json changed (sha256 %s, pinned %s): copy medai-accounts docs/permissions.json and update the pin", got, vendoredCatalogueSHA256)
 	}
 }
 
@@ -532,8 +616,11 @@ func TestRouteGate_Matrix(t *testing.T) {
 		{"PUT", "/global/42", "iam-staff", 200, 200},
 		{"PUT", "/global/42", "accounts-admin", 403, 403},
 		{"PUT", "/global/42", "superadmin", 403, 200},
-		{"GET", "/legacy", "learner", 200, 403}, // undeclared: 403 with a token
-		{"GET", "/legacy", "", 401, 401},        // and 401 without
+		{"PUT", "/global/42", "superadmin-role-empty-claim", 403, 403}, // the claim decides
+		{"POST", "/generate", "superadmin-role-empty-claim", 403, 403},
+		{"PUT", "/global/42", "iam-superadmin", 403, 200}, // legacy: exact superadmin role
+		{"GET", "/legacy", "learner", 200, 403},           // undeclared: 403 with a token
+		{"GET", "/legacy", "", 401, 401},                  // and 401 without
 		{"GET", "/open-undeclared", "", 200, 401},
 		{"GET", "/open-undeclared", "learner", 200, 403},
 	}
@@ -746,6 +833,26 @@ func TestRouteGate_RealTokens(t *testing.T) {
 	if got := call(e, "PUT", "/global/1", iamAdmin); got != 403 {
 		t.Fatalf("IAM admin token on a staff route: %d", got)
 	}
+	// An IAM token carrying a planted v1/permissions claim: the legacy IAM
+	// issuer verified it, so the claim is ignored and the legacy mapping decides.
+	planted := university(claimsFor(iamIssuer, g.Audience, g.UserID, g.AccountID, c.now()), "user")
+	planted[PermissionsClaim] = "*"
+	if got := call(e, "POST", "/generate", iam.sign(t, planted)); got != 403 {
+		t.Fatalf("IAM token with a planted * claim must get the legacy mapping (none): %d", got)
+	}
+	plantedAdmin := university(claimsFor(iamIssuer, g.Audience, g.UserID, g.AccountID, c.now()), "admin")
+	plantedAdmin[PermissionsClaim] = ""
+	if got := call(e, "POST", "/generate", iam.sign(t, plantedAdmin)); got != 200 {
+		t.Fatalf("IAM admin token with a planted empty claim keeps the legacy admin bundle: %d", got)
+	}
+	// An accounts token whose v1/roles is superadmin but whose claim is "":
+	// the claim decides.
+	superNone := claimsFor(g.Issuer, g.Audience, g.UserID, g.AccountID, c.now())
+	superNone["https://iam.weos.io/v1/roles"] = "superadmin"
+	superNone[PermissionsClaim] = ""
+	if got := call(e, "PUT", "/global/1", accountsKey.sign(t, superNone)); got != 403 {
+		t.Fatalf("accounts token: v1/roles superadmin with v1/permissions=\"\" is not superadmin: %d", got)
+	}
 	// An IAM superadmin token passes everything declared.
 	superClaims := claimsFor(iamIssuer, g.Audience, g.UserID, g.AccountID, c.now())
 	superClaims["https://iam.weos.io/v1/roles"] = "superadmin"
@@ -794,9 +901,23 @@ func TestMapClaims_RouteGateClaims(t *testing.T) {
 		t.Fatalf("mapped: %+v", m)
 	}
 
+	// x-jwt-map user = v1/user: the sub pre-fill of the user claim must not
+	// make a token without v1/user a user token.
+	byUser := &OpenIDConnect{userIDClaim: iamUserClaim, roleClaim: "https://iam.weos.io/v1/roles"}
+	raw, _ := json.Marshal(map[string]interface{}{"sub": "/users/1", "https://iam.weos.io/v1/roles": "superadmin"})
+	m = byUser.mapClaims("/users/1", func(v interface{}) error { return json.Unmarshal(raw, v) })
+	if m.claimsErr != nil || m.User != "" || m.IsUserToken() || m.UserID != "/users/1" {
+		t.Fatalf("a token without v1/user is not a user token: %+v", m)
+	}
+	raw, _ = json.Marshal(map[string]interface{}{"sub": "/users/1", iamUserClaim: "/users/1"})
+	m = byUser.mapClaims("/users/1", func(v interface{}) error { return json.Unmarshal(raw, v) })
+	if !m.IsUserToken() {
+		t.Fatalf("a token with v1/user equal to sub is a user token: %+v", m)
+	}
+
 	// Without tenant/tenant_role in x-jwt-map (tutor's scheme) the defaults apply.
 	tutor := &OpenIDConnect{userIDClaim: "sub", roleClaim: "https://iam.weos.io/v1/roles"}
-	raw, _ := json.Marshal(map[string]interface{}{"sub": "/users/1", "https://iam.weos.io/v1/tenant": "/tenants/x", "https://iam.weos.io/v1/tenant_role": "admin"})
+	raw, _ = json.Marshal(map[string]interface{}{"sub": "/users/1", "https://iam.weos.io/v1/tenant": "/tenants/x", "https://iam.weos.io/v1/tenant_role": "admin"})
 	m = tutor.mapClaims("/users/1", func(v interface{}) error { return json.Unmarshal(raw, v) })
 	if m.Tenant != "/tenants/x" || m.TenantRole != "admin" {
 		t.Fatalf("defaults: %+v", m)

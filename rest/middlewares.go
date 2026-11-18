@@ -128,12 +128,15 @@ func SecurityMiddleware(p *MiddlewareParams) echo.MiddlewareFunc {
 			return
 		}
 		if gateAllowed := gate.Allows(rule, result); gateAllowed != casbinAllowed {
-			role := ""
+			// role="" or user_token=false on a token marks a caller that is not a
+			// signed-in user (a machine token): the gate refuses those, so they
+			// must be gone before WEOS_ROUTE_GATE=on (docs/route-gate.md).
+			role, userToken, legacyIssuer := "", false, false
 			if result != nil {
-				role = result.Role
+				role, userToken, legacyIssuer = result.Role, result.IsUserToken(), result.LegacyIssuer
 			}
-			line := fmt.Sprintf("route_gate.disagree method=%s path=%s route=%q role=%q access=%q permission=%q casbin=%s gate=%s",
-				ctxt.Request().Method, ctxt.Request().URL.Path, path, role, rule.Access, rule.Permission, answer(casbinAllowed), answer(gateAllowed))
+			line := fmt.Sprintf("route_gate.disagree method=%s path=%s route=%q role=%q user_token=%t legacy_issuer=%t access=%q permission=%q casbin=%s gate=%s",
+				ctxt.Request().Method, ctxt.Request().URL.Path, path, role, userToken, legacyIssuer, rule.Access, rule.Permission, answer(casbinAllowed), answer(gateAllowed))
 			ctxt.Logger().Warn(line)
 			if gate.onDisagree != nil {
 				gate.onDisagree(line)

@@ -74,7 +74,7 @@ undeclared, err := rest.ValidateRouteDeclarations(doc, catalogue)
 | `WEOS_ROUTE_GATE` | Who decides |
 |---|---|
 | `off` (default) | casbin `x-auth`, exactly as before. Declarations are not read. |
-| `shadow` | casbin decides. The gate also decides and logs `route_gate.disagree` (method, path, route, role, access, permission, `casbin=allow/deny`, `gate=allow/deny`) when the answers differ. |
+| `shadow` | casbin decides. The gate also decides and logs `route_gate.disagree` (method, path, route, role, `user_token`, `legacy_issuer`, access, permission, `casbin=allow/deny`, `gate=allow/deny`) when the answers differ. |
 | `on` | The gate decides. casbin `Enforce` is never called, `x-auth` policies are not added, and casbin policies are not loaded from the database. |
 
 In `on`, an undeclared operation answers **403** to a valid token and **401**
@@ -94,26 +94,34 @@ A suggested rollout: `shadow` on TEST, then read the `route_gate.disagree` and
 2. Undeclared operations are refused (see above).
 3. A valid **user** token is required, where `sub` equals
    `https://iam.weos.io/v1/user`.
-4. When `v1/roles` holds `superadmin` (comma-split, exact match), everything
-   declared passes.
+4. When the effective permissions hold `*` (superadmin), everything declared
+   passes.
 5. `signed-in` passes.
 6. `x-permission: <name>` passes when the effective permissions hold `<name>`
    or `*`. Matches are exact, never by substring.
 
 The effective permissions come from `https://iam.weos.io/v1/permissions`, a
-sorted, comma-separated string. `""` means none, and `*` means all.
+sorted, comma-separated string. `""` means none, and `*` means all. When the key
+is present, **the claim alone decides**: accounts writes `*` for a superadmin,
+so `v1/roles` is not read (a `v1/roles: superadmin` token with `""` has none).
 
-When the token has no such key (IAM tokens and older tokens), the gate uses the
-catalogue's `legacy` mapping, the same as accounts' `legacyPermissions`:
+The gate uses the catalogue's `legacy` mapping, the same as accounts'
+`legacyPermissions`, when the token has no such key (older tokens), and for
+**every token the legacy IAM issuer verified** (trusted-issuer mode,
+`LEGACY_IAM_*`): IAM never mints the claim, so one on an IAM token is ignored.
 
-- `superadmin` gets `*`.
-- In the MedAI workspace (`v1/tenant` is `""`, `/tenants/medai` or `medai`),
-  `Administrator` gets the staff bundle, and anyone else gets none.
+- `v1/roles` exactly `superadmin` gets `*` (no list split, case-sensitive).
+- In the MedAI workspace, `Administrator` gets the staff bundle, and anyone
+  else gets none. `v1/tenant` is first normalised as learning's
+  `tenantctx.NormalizeID` does (a URL keeps its path; `BASE_PATH` and a leading
+  `/v1` are stripped); MedAI is `""`, `/tenants/medai` or `medai` before or
+  after that. A non-empty value that normalises to nothing (a bare id other than
+  `medai`, junk) is **not** MedAI: it fails closed to the tenant-role rule.
 - Elsewhere, `v1/tenant_role` `owner` or `admin` gets that role's bundle, and
   anyone else gets none.
 
-The fallback applies **only when the key is absent**. A present `""`, a `null`
-or a value of another type means no permissions.
+The fallback applies **only when the key is absent** (or the issuer is IAM). A
+present `""`, a `null` or a value of another type means no permissions.
 
 ## Handler checks
 
@@ -125,6 +133,9 @@ rest.GetTenantRole(ctx)                     // v1/tenant_role
 rest.Permissions(ctx)                       // effective permissions (a copy), nil without a user
 rest.HasPermission(ctx, "catalog:view-hidden")
 ```
+
+`v1/user` is read from the token's own claims, never from the `x-jwt-map`
+`user` default (`sub`), so a token without `v1/user` is never a user token.
 
 `HasPermission` follows the gate's rules, including the legacy fallback and `*`.
 Convert handler role checks to it, so that `off` stays as safe as today.
