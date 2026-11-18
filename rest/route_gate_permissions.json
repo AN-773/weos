@@ -1,0 +1,359 @@
+{
+  "version": 1,
+  "claim": {
+    "key": "https://iam.weos.io/v1/permissions",
+    "format": "permission names sorted, comma-joined, no spaces; \"\" for none; \"*\" passes everything",
+    "all": "*"
+  },
+  "permissions": [
+    {
+      "name": "content:generate",
+      "group": "Content",
+      "description": "Generate questions, learning objectives, item suggestions and module plans.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "content:review",
+      "group": "Content",
+      "description": "Accept, reject and edit suggestions; act on module-generation jobs; list suggestions and jobs.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "catalog:edit",
+      "group": "Catalog",
+      "description": "Edit the workspace catalog: choices, competencies, disciplines, subjects, difficulties, curricula, items, topics, syndromes and learning objectives (with import); delete catalog entries.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "catalog:view-hidden",
+      "group": "Catalog",
+      "description": "See hidden curricula and read multimedia by id.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "files:manage",
+      "group": "Files",
+      "description": "Read and delete uploaded files by id.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "psychometrics:view",
+      "group": "Analytics",
+      "description": "See question-bank psychometrics: dashboard stats and stats.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "course:manage",
+      "group": "Courses",
+      "description": "Create and change courses, modules, sessions and resources; sync the knowledge base.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "cohort:manage",
+      "group": "Cohorts",
+      "description": "Create and change cohorts.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "cohort:view",
+      "group": "Cohorts",
+      "description": "See cohort rosters and learner metrics.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "results:view",
+      "group": "Results",
+      "description": "See exam results and read feedback.",
+      "service": "learning",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "faculty:ask",
+      "group": "Faculty",
+      "description": "Use the faculty assistant (the faculty allowlist still applies).",
+      "service": "agent-v2",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "members:view",
+      "group": "Members",
+      "description": "See the workspace members list and invites.",
+      "service": "accounts",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "members:invite",
+      "group": "Members",
+      "description": "Invite people to the workspace, one by one or by import.",
+      "service": "accounts",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "members:manage",
+      "group": "Members",
+      "description": "Change members' roles and remove members.",
+      "service": "accounts",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "roles:manage",
+      "group": "Roles",
+      "description": "Create, change and delete the workspace's roles. Owner only by default.",
+      "service": "accounts",
+      "grantable": true,
+      "kind": "workspace"
+    },
+    {
+      "name": "catalog:edit-global",
+      "group": "Staff",
+      "description": "Edit the global (MedAI) catalog shared by every workspace.",
+      "service": "learning",
+      "grantable": false,
+      "kind": "staff"
+    },
+    {
+      "name": "tutor:prompts",
+      "group": "Staff",
+      "description": "Read and change tutor prompts.",
+      "service": "tutor",
+      "grantable": false,
+      "kind": "staff"
+    },
+    {
+      "name": "tutor:analytics",
+      "group": "Staff",
+      "description": "See tutor analytics.",
+      "service": "tutor",
+      "grantable": false,
+      "kind": "staff"
+    },
+    {
+      "name": "accounts:blocks-delete",
+      "group": "Staff",
+      "description": "Delete exam blocks under any account (/accounts/{accountId}/blocks).",
+      "service": "learning",
+      "grantable": false,
+      "kind": "staff"
+    },
+    {
+      "name": "platform:prompts",
+      "group": "Platform",
+      "description": "Read the platform prompt catalog.",
+      "service": "learning",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:settings",
+      "group": "Platform",
+      "description": "Change platform settings: app status, app version, session size caps.",
+      "service": "learning",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:audit",
+      "group": "Platform",
+      "description": "Read study-plan audits.",
+      "service": "learning",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:accounts",
+      "group": "Platform",
+      "description": "Manage any account.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:psychometrics",
+      "group": "Platform",
+      "description": "Run and see psychometrics across every workspace.",
+      "service": "learning",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:tenants",
+      "group": "Platform",
+      "description": "Create and change workspaces (tenants), including paying.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:skills",
+      "group": "Platform",
+      "description": "Publish and change assistant skills.",
+      "service": "agent-v2",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:promo",
+      "group": "Platform",
+      "description": "Manage promo codes.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:partners",
+      "group": "Platform",
+      "description": "Manage partners, agreements and payouts.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:team-cards",
+      "group": "Platform",
+      "description": "Manage team contact cards.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:impersonate",
+      "group": "Platform",
+      "description": "Sign in as another user.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:users",
+      "group": "Platform",
+      "description": "Change and delete users and their platform roles.",
+      "service": "accounts",
+      "grantable": false,
+      "kind": "platform"
+    },
+    {
+      "name": "platform:notify",
+      "group": "Platform",
+      "description": "Send notifications to users.",
+      "service": "notify",
+      "grantable": false,
+      "kind": "platform"
+    }
+  ],
+  "roles": [
+    {
+      "key": "owner",
+      "name": "Owner",
+      "description": "Runs the workspace: every workspace permission, including roles.",
+      "permissions": [
+        "catalog:edit",
+        "catalog:view-hidden",
+        "cohort:manage",
+        "cohort:view",
+        "content:generate",
+        "content:review",
+        "course:manage",
+        "faculty:ask",
+        "files:manage",
+        "members:invite",
+        "members:manage",
+        "members:view",
+        "psychometrics:view",
+        "results:view",
+        "roles:manage"
+      ]
+    },
+    {
+      "key": "admin",
+      "name": "Admin",
+      "description": "Manages the workspace, its content and its members, but not its roles. Cannot grant Owner.",
+      "permissions": [
+        "catalog:edit",
+        "catalog:view-hidden",
+        "cohort:manage",
+        "cohort:view",
+        "content:generate",
+        "content:review",
+        "course:manage",
+        "faculty:ask",
+        "files:manage",
+        "members:invite",
+        "members:manage",
+        "members:view",
+        "psychometrics:view",
+        "results:view"
+      ]
+    },
+    {
+      "key": "user",
+      "name": "Student",
+      "description": "Studies in the workspace. No management permissions.",
+      "permissions": []
+    }
+  ],
+  "staff": {
+    "permissions": [
+      "accounts:blocks-delete",
+      "catalog:edit",
+      "catalog:edit-global",
+      "catalog:view-hidden",
+      "cohort:manage",
+      "cohort:view",
+      "content:generate",
+      "content:review",
+      "course:manage",
+      "faculty:ask",
+      "files:manage",
+      "members:invite",
+      "members:manage",
+      "members:view",
+      "psychometrics:view",
+      "results:view",
+      "roles:manage",
+      "tutor:analytics",
+      "tutor:prompts"
+    ]
+  },
+  "superadmin": {
+    "permissions": [
+      "*"
+    ]
+  },
+  "legacy": {
+    "description": "For a token without the claim: roles == superadminRole -> [\"*\"]; tenant in medaiTenants -> staff bundle when roles == staffRole, else none; otherwise tenantRoleBundles[tenant_role] -> that role's permissions, else none. Exact, case-sensitive matches.",
+    "superadminRole": "superadmin",
+    "staffRole": "Administrator",
+    "medaiTenants": [
+      "",
+      "/tenants/medai",
+      "medai"
+    ],
+    "tenantRoleBundles": {
+      "owner": "owner",
+      "admin": "admin"
+    }
+  }
+}

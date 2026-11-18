@@ -20,6 +20,12 @@ const SUBSCRIPTION_ID ContextKey = "SUBSCRIPTION_ID"
 const OPERATION_ID = "OPERATION_ID"
 const USER_ID ContextKey = "USER_ID"
 const ROLE ContextKey = "ROLE"
+
+// Route-gate values (see route_gate.go): the token's v1/tenant, v1/tenant_role
+// and effective permissions ([]string).
+const TENANT ContextKey = "TENANT"
+const TENANT_ROLE ContextKey = "TENANT_ROLE"
+const PERMISSIONS ContextKey = "PERMISSIONS"
 const LOG_LEVEL ContextKey = "LOG_LEVEL"
 const REQUEST_ID ContextKey = "REQUEST_ID"
 const WEOS_ID ContextKey = "WEOS_ID"

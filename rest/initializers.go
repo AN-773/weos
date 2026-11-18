@@ -9,6 +9,7 @@ import (
 	"go.uber.org/fx"
 	"gorm.io/gorm"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime/debug"
 )
@@ -36,6 +37,8 @@ type RouteParams struct {
 	GORMDB                *gorm.DB
 	AuthorizationEnforcer *casbin.Enforcer
 	SecuritySchemes       map[string]Validator
+	// RouteGate overrides the gate read from WEOS_ROUTE_GATE (tests, embedders).
+	RouteGate *RouteGate `optional:"true"`
 }
 
 // RouteInitializer initializes the routes for the application using the open api config
@@ -53,6 +56,21 @@ func RouteInitializer(p RouteParams) (err error) {
 	for _, config := range p.Middlewares {
 		for name, tmiddleware := range config {
 			middlewares[name] = tmiddleware
+		}
+	}
+
+	// The route gate (route_gate.go): off unless WEOS_ROUTE_GATE says otherwise.
+	gate := p.RouteGate
+	if gate == nil {
+		if gate, err = NewRouteGateFromEnv(p.Config, os.Getenv); err != nil {
+			return err
+		}
+	}
+	gateOn := gate.gateMode() == RouteGateOn
+	if gate.gateMode() != RouteGateOff {
+		p.Logger.Infof("route_gate.mode mode=%s strict=%t undeclared=%d", gate.Mode, gate.Strict, len(gate.Undeclared))
+		for _, undeclared := range gate.Undeclared {
+			p.Logger.Warnf("route_gate.undeclared method=%s path=%s operationId=%s", undeclared.Method, undeclared.Path, undeclared.OperationID)
 		}
 	}
 
@@ -188,14 +206,15 @@ func RouteInitializer(p RouteParams) (err error) {
 			}
 
 			var operationMiddleware []echo.MiddlewareFunc
-			//set up the security middleware if there is a config setup
-			if len(p.Config.Security) > 0 {
+			//set up the security middleware if there is a config setup (always with the gate on)
+			if len(p.Config.Security) > 0 || gateOn {
 				operationMiddleware = append(operationMiddleware, SecurityMiddleware(&MiddlewareParams{
 					Logger:                p.Logger,
 					SecuritySchemes:       p.SecuritySchemes,
 					Schema:                p.Config,
 					APIConfig:             p.APIConfig,
 					AuthorizationEnforcer: p.AuthorizationEnforcer,
+					RouteGate:             gate,
 					PathMap: map[string]*openapi3.PathItem{
 						path: pathItem,
 					},
@@ -251,8 +270,8 @@ func RouteInitializer(p RouteParams) (err error) {
 			echoPath := re.ReplaceAllString(path, `:$1`)
 			p.Echo.Add(method, p.APIConfig.BasePath+echoPath, handler, allMiddleware...)
 
-			//setup security enforcer
-			if authRaw, ok := operation.Extensions[AuthorizationConfigExtension]; ok {
+			//setup security enforcer (not with the gate on: casbin is never consulted)
+			if authRaw, ok := operation.Extensions[AuthorizationConfigExtension]; ok && !gateOn {
 
 				defer func() {
 					if err1 := recover(); err1 != nil {

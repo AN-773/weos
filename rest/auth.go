@@ -31,6 +31,24 @@ type ValidationResult struct {
 	AccountID      string
 	ApplicationID  string
 	SubscriptionID string
+	// Subject is the token's sub and User its https://iam.weos.io/v1/user; a
+	// user token has both, equal (see IsUserToken).
+	Subject string
+	User    string
+	// Tenant and TenantRole are v1/tenant and v1/tenant_role ("" when absent).
+	Tenant     string
+	TenantRole string
+	// Permissions is the v1/permissions claim. PermissionsClaimPresent is false
+	// only when the key is absent (IAM and older tokens get the legacy mapping);
+	// a present "" (or a non-string) means no permissions.
+	Permissions             string
+	PermissionsClaimPresent bool
+}
+
+// IsUserToken reports whether the token names a user: sub is non-empty and
+// equals https://iam.weos.io/v1/user.
+func (r *ValidationResult) IsUserToken() bool {
+	return r != nil && r.Subject != "" && r.Subject == r.User
 }
 
 //security interfaces
@@ -70,6 +88,19 @@ func NewSecurityConfiguration(p SecurityParams) (result SecurityConfiguration, e
 		}
 	}
 
+	// With WEOS_ROUTE_GATE=on the route gate decides and casbin is never
+	// consulted, so its policies are not loaded (nor its table touched): the
+	// enforcer is an empty in-memory one, kept only so the fx graph is unchanged.
+	gateMode, err := ParseRouteGateMode(os.Getenv(EnvRouteGate))
+	if err != nil {
+		return result, err
+	}
+	if gateMode == RouteGateOn {
+		m, _ := casbinmodel.NewModelFromString(casbinRESTModel)
+		result.AuthEnforcer, err = casbin.NewEnforcer(m)
+		return result, err
+	}
+
 	//setup casbin enforcer
 	adapter, err := gormadapter.NewAdapterByDB(p.GORMDB)
 	if err != nil {
@@ -77,7 +108,13 @@ func NewSecurityConfiguration(p SecurityParams) (result SecurityConfiguration, e
 	}
 
 	//default REST permission model
-	text := `[request_definition]
+	m, _ := casbinmodel.NewModelFromString(casbinRESTModel)
+	result.AuthEnforcer, err = casbin.NewEnforcer(m, adapter)
+	return result, err
+}
+
+// casbinRESTModel is the default REST permission model.
+const casbinRESTModel = `[request_definition]
 r = sub, obj, act
 
 [policy_definition]
@@ -89,10 +126,6 @@ e = some(where (p.eft == allow))
 [matchers]
 m = r.sub == p.sub && keyMatch(r.obj, p.obj) && regexMatch(r.act, p.act)
 `
-	m, _ := casbinmodel.NewModelFromString(text)
-	result.AuthEnforcer, err = casbin.NewEnforcer(m, adapter)
-	return result, err
-}
 
 // OpenIDConnect authorizer for OpenID
 type OpenIDConnect struct {
@@ -104,6 +137,9 @@ type OpenIDConnect struct {
 	accountClaim      string
 	applicationClaim  string
 	subscriptionClaim string
+	tenantClaim       string
+	tenantRoleClaim   string
+	permissionsClaim  string
 	httpClient        *http.Client
 	KeySet            oidc.KeySet
 	// trusted is set in trusted-issuer mode (see auth_issuers.go); nil keeps
@@ -157,8 +193,8 @@ type mappedClaims struct {
 
 // mapClaims applies the x-jwt-map to a verified token's claims. Both modes use
 // it, so the request context values are the same whichever issuer signed the
-// token: user defaults to sub, and role/account/application/subscription are
-// read with plain string casts, as WeOS always has.
+// token: user defaults to sub, and role/account/application/subscription,
+// tenant, tenant_role and permissions are read as strings ("" when absent).
 func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) error) (result mappedClaims) {
 	tclaims := make(map[string]interface{})
 	tclaims[o.userIDClaim] = subject
@@ -171,19 +207,37 @@ func (o *OpenIDConnect) mapClaims(subject string, claims func(v interface{}) err
 	}
 	result.claimsErr = claims(&tclaims)
 	if result.claimsErr == nil {
-		result.Role = tclaims[o.roleClaim].(string)
-		result.UserID = tclaims[o.userIDClaim].(string)
+		// Every claim is read with comma-ok: IAM and older tokens lack some of
+		// them (v1/subscription, v1/tenant_role, v1/permissions), and a missing
+		// key or a value of another type must never panic; it reads as "".
+		result.Role, _ = tclaims[o.roleClaim].(string)
+		result.UserID, _ = tclaims[o.userIDClaim].(string)
 		if o.accountClaim != "" {
-			result.AccountID = tclaims[o.accountClaim].(string)
+			result.AccountID, _ = tclaims[o.accountClaim].(string)
 		}
 		if o.applicationClaim != "" {
-			result.ApplicationID = tclaims[o.applicationClaim].(string)
+			result.ApplicationID, _ = tclaims[o.applicationClaim].(string)
 		}
 		if o.subscriptionClaim != "" {
-			result.SubscriptionID = tclaims[o.subscriptionClaim].(string)
+			result.SubscriptionID, _ = tclaims[o.subscriptionClaim].(string)
 		}
+		result.Subject = subject
+		result.User, _ = tclaims[iamUserClaim].(string)
+		result.Tenant, _ = tclaims[o.claimName(o.tenantClaim, TenantClaim)].(string)
+		result.TenantRole, _ = tclaims[o.claimName(o.tenantRoleClaim, TenantRoleClaim)].(string)
+		var permissions interface{}
+		permissions, result.PermissionsClaimPresent = tclaims[o.claimName(o.permissionsClaim, PermissionsClaim)]
+		result.Permissions, _ = permissions.(string)
 	}
 	return result
+}
+
+// claimName is the x-jwt-map name of a claim, or its default.
+func (o *OpenIDConnect) claimName(mapped, fallback string) string {
+	if mapped != "" {
+		return mapped
+	}
+	return fallback
 }
 
 func (o *OpenIDConnect) Validate(ctxt echo.Context) (result *ValidationResult, err error) {
@@ -232,8 +286,9 @@ func (o *OpenIDConnect) Validate(ctxt echo.Context) (result *ValidationResult, e
 			var applicationID string
 			var subscriptionID string
 
+			var mapped mappedClaims
 			if token != nil {
-				mapped := o.mapClaims(token.Subject, token.Claims)
+				mapped = o.mapClaims(token.Subject, token.Claims)
 				err = mapped.claimsErr
 				role = mapped.Role
 				userID = mapped.UserID
@@ -243,13 +298,19 @@ func (o *OpenIDConnect) Validate(ctxt echo.Context) (result *ValidationResult, e
 			}
 
 			return &ValidationResult{
-				Valid:          token != nil && err == nil,
-				Token:          tokenString,
-				UserID:         userID,
-				Role:           role,
-				AccountID:      accountID,
-				ApplicationID:  applicationID,
-				SubscriptionID: subscriptionID,
+				Valid:                   token != nil && err == nil,
+				Token:                   tokenString,
+				UserID:                  userID,
+				Role:                    role,
+				AccountID:               accountID,
+				ApplicationID:           applicationID,
+				SubscriptionID:          subscriptionID,
+				Subject:                 mapped.Subject,
+				User:                    mapped.User,
+				Tenant:                  mapped.Tenant,
+				TenantRole:              mapped.TenantRole,
+				Permissions:             mapped.Permissions,
+				PermissionsClaimPresent: mapped.PermissionsClaimPresent,
 			}, err
 		} else {
 			return result, fmt.Errorf("expected jwks_url to be set")
@@ -283,6 +344,15 @@ func (o *OpenIDConnect) FromSchema(ctxt context.Context, scheme *openapi3.Securi
 		}
 		if value, ok := jwtMapRaw.(map[string]interface{})["subscription"]; ok {
 			o.subscriptionClaim = value.(string)
+		}
+		if value, ok := jwtMapRaw.(map[string]interface{})["tenant"].(string); ok {
+			o.tenantClaim = value
+		}
+		if value, ok := jwtMapRaw.(map[string]interface{})["tenant_role"].(string); ok {
+			o.tenantRoleClaim = value
+		}
+		if value, ok := jwtMapRaw.(map[string]interface{})["permissions"].(string); ok {
+			o.permissionsClaim = value
 		}
 	} else {
 		o.userIDClaim = "sub"
