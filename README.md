@@ -20,6 +20,7 @@ Build your app using microservices that combine an [OpenAPI Specification](https
 * **Cross Platform** - Binaries available for Windows, Linux and MacOS
 * **Wide Database Support** - SQLite, MySQL, MariaDB, Postgres, SQLServer (Coming Soon)
 * **Secure** - Middleware for CORs, Authentication, Authorization
+* **Route gate** - Per-operation `x-access` / `x-permission` declarations checked against a vendored permission catalogue (`WEOS_ROUTE_GATE=off|shadow|on`); see [docs/features/route-gate.md](./docs/features/route-gate.md)
 * **Fast** - Built on Go for blazing fast performance
 * **Highly Customizable** - Configure API using Open API, Setup middleware and controllers
 
